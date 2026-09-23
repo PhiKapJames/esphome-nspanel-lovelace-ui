@@ -11,6 +11,17 @@ namespace esphome {
 namespace nspanel_lovelace {
 static const char *const TAG = "nspanel_lovelace_upload";
 
+static std::string replace_custom_send_topic_(const std::string &topic, const char *replacement) {
+  const std::string marker = "CustomSend";
+  const auto pos = topic.find(marker);
+  if (pos == std::string::npos)
+    return topic;
+
+  std::string result = topic;
+  result.replace(pos, marker.size(), replacement);
+  return result;
+}
+
 // Followed guide
 // https://unofficialnextion.com/t/nextion-upload-protocol-v1-2-the-fast-one/1044/2
 
@@ -96,13 +107,13 @@ int NSPanelLovelace::upload_by_chunks_(HTTPClient *http, const std::string &url,
     }
 
     this->recv_ret_string_(recv_string, 5000, true);
-    if (recv_string[0] != 0x05) { // 0x05 == "ok"
+    if (recv_string.empty() || recv_string[0] != 0x05) { // 0x05 == "ok"
       ESP_LOGD(TAG, "recv_string [%s]",
                format_hex_pretty(reinterpret_cast<const uint8_t *>(recv_string.data()), recv_string.size()).c_str());
     }
 
     // handle partial upload request
-    if (recv_string[0] == 0x08 && recv_string.size() == 5) {
+    if (recv_string.size() == 5 && recv_string[0] == 0x08) {
       uint32_t result = 0;
       for (int j = 0; j < 4; ++j) {
         result += static_cast<uint8_t>(recv_string[j + 1]) << (8 * j);
@@ -183,13 +194,13 @@ int NSPanelLovelace::upload_by_chunks_(const std::string &url, int range_start) 
         this->content_length_ -= read_len;
         ESP_LOGD(TAG, "Uploaded %0.2f %%, remaining %d bytes",
                  100.0 * (this->tft_size_ - this->content_length_) / this->tft_size_, this->content_length_);
-        if (recv_string[0] != 0x05) {  // 0x05 == "ok"
+        if (recv_string.empty() || recv_string[0] != 0x05) {  // 0x05 == "ok"
           ESP_LOGD(
               TAG, "recv_string [%s]",
               format_hex_pretty(reinterpret_cast<const uint8_t *>(recv_string.data()), recv_string.size()).c_str());
         }
         // handle partial upload request
-        if (recv_string[0] == 0x08 && recv_string.size() == 5) {
+        if (recv_string.size() == 5 && recv_string[0] == 0x08) {
           uint32_t result = 0;
           for (int j = 0; j < 4; ++j) {
             result += static_cast<uint8_t>(recv_string[j + 1]) << (8 * j);
@@ -201,7 +212,6 @@ int NSPanelLovelace::upload_by_chunks_(const std::string &url, int range_start) 
             delete[] buffer;
             ESP_LOGVV(TAG, "Memory for buffer deallocated");
             esp_http_client_cleanup(client);
-            esp_http_client_close(client);
             return result;
           }
         }
@@ -220,7 +230,6 @@ int NSPanelLovelace::upload_by_chunks_(const std::string &url, int range_start) 
     ESP_LOGVV(TAG, "Memory for buffer deallocated");
   }
   esp_http_client_cleanup(client);
-  esp_http_client_close(client);
   return range_end + 1;
 }
 #endif
@@ -317,6 +326,7 @@ void NSPanelLovelace::init_upload(const std::string &url) {
   }
   this->content_length_ = tft_file_size;
   this->tft_size_ = tft_file_size;
+  esp_http_client_cleanup(http);
 }
 #endif
 
@@ -337,6 +347,16 @@ void NSPanelLovelace::upload_tft(const std::string &url) {
 
   this->is_updating_ = true;
 
+  // TFT transfers are memory-sensitive, especially with ESP-IDF. Stop the
+  // panel command subscriptions while the transfer is active so AppDaemon
+  // traffic cannot build up MQTT work while the display is in update mode.
+  ESP_LOGD(TAG, "Pausing NSPanel MQTT subscriptions during TFT update");
+  this->mqtt_->unsubscribe(this->send_topic_);
+  if (this->berry_driver_version_ > 0) {
+    this->mqtt_->unsubscribe(replace_custom_send_topic_(this->send_topic_, "GetDriverVersion"));
+    this->mqtt_->unsubscribe(replace_custom_send_topic_(this->send_topic_, "FlashNextion"));
+  }
+
 #ifdef USE_ARDUINO
   HTTPClient http;
   this->init_upload(&http, url);
@@ -347,6 +367,7 @@ void NSPanelLovelace::upload_tft(const std::string &url) {
   if (this->content_length_ < 4096) {
     ESP_LOGE(TAG, "Failed to get file size");
     this->upload_end_();
+    return;
   }
 
   ESP_LOGD(TAG, "Updating Nextion");
@@ -384,8 +405,10 @@ void NSPanelLovelace::upload_tft(const std::string &url) {
   if (response.find(0x05) != std::string::npos) {
     ESP_LOGD(TAG, "preparation for tft update done");
   } else {
-    ESP_LOGD(TAG, "preparation for tft update failed %d \"%s\"", response[0], response.c_str());
+    const int response_byte = response.empty() ? -1 : static_cast<uint8_t>(response[0]);
+    ESP_LOGD(TAG, "preparation for tft update failed %d \"%s\"", response_byte, response.c_str());
     this->upload_end_();
+    return;
   }
 
   // Nextion wants 4096 bytes at a time. Make chunk_size a multiple of 4096
@@ -409,8 +432,10 @@ void NSPanelLovelace::upload_tft(const std::string &url) {
       ESP_LOGD(TAG, "Allocating %d buffer", chunk_size);
       this->transfer_buffer_ = allocator.allocate(chunk_size);
 
-      if (!this->transfer_buffer_)
+      if (!this->transfer_buffer_) {
         this->upload_end_();
+        return;
+      }
     }
 
     this->transfer_buffer_size_ = chunk_size;
@@ -430,6 +455,7 @@ void NSPanelLovelace::upload_tft(const std::string &url) {
     if (result < 0) {
       ESP_LOGD(TAG, "Error updating Nextion!");
       this->upload_end_();
+      return;
     }
     App.feed_wdt();
     // NOLINTNEXTLINE(readability-static-accessed-through-instance)
