@@ -1,4 +1,3 @@
-#include <regex>
 #include "nspanel_lovelace.h"
 
 #include "esphome/core/application.h"
@@ -10,6 +9,17 @@ namespace nspanel_lovelace {
 
 static const char *const TAG = "nspanel_lovelace";
 
+static std::string replace_custom_send_topic_(const std::string &topic, const char *replacement) {
+  const std::string marker = "CustomSend";
+  const auto pos = topic.find(marker);
+  if (pos == std::string::npos)
+    return topic;
+
+  std::string result = topic;
+  result.replace(pos, marker.size(), replacement);
+  return result;
+}
+
 void NSPanelLovelace::setup() {
   this->mqtt_->subscribe(this->send_topic_, [this](const std::string &topic, const std::string &payload) {
     this->send_custom_command(payload);
@@ -18,14 +28,14 @@ void NSPanelLovelace::setup() {
   });
 
   if (this->berry_driver_version_ > 0) {
-    this->mqtt_->subscribe(std::regex_replace(this->send_topic_, std::regex("CustomSend"), "GetDriverVersion"),
+    this->mqtt_->subscribe(replace_custom_send_topic_(this->send_topic_, "GetDriverVersion"),
                            [this](const std::string &topic, const std::string &payload) {
                              this->mqtt_->publish_json(this->recv_topic_, [this](ArduinoJson::JsonObject root) {
                                root["nlui_driver_version"] = this->berry_driver_version_;
                              });
                            });
 
-    this->mqtt_->subscribe(std::regex_replace(this->send_topic_, std::regex("CustomSend"), "FlashNextion"),
+    this->mqtt_->subscribe(replace_custom_send_topic_(this->send_topic_, "FlashNextion"),
                            [this](const std::string &topic, const std::string &payload) {
                              ESP_LOGD(TAG, "FlashNextion called with URL '%s'", payload.c_str());
 
