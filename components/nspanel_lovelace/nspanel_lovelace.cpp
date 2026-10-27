@@ -21,10 +21,13 @@ static std::string replace_custom_send_topic_(const std::string &topic, const ch
 }
 
 void NSPanelLovelace::setup() {
+  if (!this->use_missed_updates_workaround_)
+    this->custom_send_queue_.set_interval(0);
+
   this->mqtt_->subscribe(this->send_topic_, [this](const std::string &topic, const std::string &payload) {
+    // Queued and paced from loop(); a delay() here would block the whole app
+    // (workaround for https://github.com/sairon/esphome-nspanel-lovelace-ui/issues/8).
     this->send_custom_command(payload);
-    // workaround for https://github.com/sairon/esphome-nspanel-lovelace-ui/issues/8
-    if (this->use_missed_updates_workaround_) delay(75);
   });
 
   if (this->berry_driver_version_ > 0) {
@@ -65,6 +68,11 @@ void NSPanelLovelace::loop() {
       this->buffer_.clear();
     }
   }
+
+  // Send at most one queued command per loop() to keep the loop responsive.
+  std::string command;
+  if (this->custom_send_queue_.next(millis(), &command))
+    this->write_custom_command_(command);
 }
 
 bool NSPanelLovelace::process_data_() {
@@ -134,8 +142,13 @@ void NSPanelLovelace::send_nextion_command(const std::string &command) {
 
 void NSPanelLovelace::send_custom_command(const std::string &command) {
   if (this->is_updating_)
-    return; // don't execute custom commands - UI updates could spoil the upload
+    return;  // don't execute custom commands - UI updates could spoil the upload
 
+  if (!this->custom_send_queue_.enqueue(command))
+    ESP_LOGW(TAG, "Custom command queue full, dropping command: %s", command.c_str());
+}
+
+void NSPanelLovelace::write_custom_command_(const std::string &command) {
   ESP_LOGD(TAG, "Sending custom command: %s", command.c_str());
   std::vector<uint8_t> data = {0x55, 0xBB};
   data.push_back(command.length() & 0xFF);

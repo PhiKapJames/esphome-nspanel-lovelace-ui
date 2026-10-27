@@ -2,6 +2,7 @@
 
 #include <utility>
 
+#include "custom_send_queue.h"
 #include "esphome/components/mqtt/mqtt_client.h"
 #include "esphome/components/uart/uart.h"
 #include "esphome/components/uart/uart_component_esp_idf.h"
@@ -68,6 +69,7 @@ class NSPanelLovelace : public Component, public uart::UARTDevice {
 
   bool process_data_();
   void process_command_(const std::string &message);
+  void write_custom_command_(const std::string &command);
 
   mqtt::MQTTClientComponent *mqtt_;
   std::string recv_topic_;
@@ -79,6 +81,7 @@ class NSPanelLovelace : public Component, public uart::UARTDevice {
   CallbackManager<void(std::string)> incoming_msg_callback_;
 
   std::vector<uint8_t> buffer_;
+  CustomSendQueue custom_send_queue_;
 
   bool is_updating_ = false;
   bool reparse_mode_ = false;
