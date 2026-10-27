@@ -11,6 +11,21 @@ namespace esphome {
 namespace nspanel_lovelace {
 static const char *const TAG = "nspanel_lovelace_upload";
 
+// ESPHome dev removed format_hex_pretty() in favour of a caller-buffer API. A small local
+// version keeps these debug logs compiling on every supported release.
+static std::string hex_pretty(const uint8_t *data, size_t len) {
+  static const char digits[] = "0123456789ABCDEF";
+  std::string out;
+  out.reserve(len * 3);
+  for (size_t i = 0; i < len; i++) {
+    if (i != 0)
+      out += ':';
+    out += digits[data[i] >> 4];
+    out += digits[data[i] & 0x0F];
+  }
+  return out;
+}
+
 static std::string replace_custom_send_topic_(const std::string &topic, const char *replacement) {
   const std::string marker = "CustomSend";
   const auto pos = topic.find(marker);
@@ -109,7 +124,7 @@ int NSPanelLovelace::upload_by_chunks_(HTTPClient *http, const std::string &url,
     this->recv_ret_string_(recv_string, 5000, true);
     if (recv_string.empty() || recv_string[0] != 0x05) { // 0x05 == "ok"
       ESP_LOGD(TAG, "recv_string [%s]",
-               format_hex_pretty(reinterpret_cast<const uint8_t *>(recv_string.data()), recv_string.size()).c_str());
+               hex_pretty(reinterpret_cast<const uint8_t *>(recv_string.data()), recv_string.size()).c_str());
     }
 
     // handle partial upload request
@@ -197,7 +212,7 @@ int NSPanelLovelace::upload_by_chunks_(const std::string &url, int range_start) 
         if (recv_string.empty() || recv_string[0] != 0x05) {  // 0x05 == "ok"
           ESP_LOGD(
               TAG, "recv_string [%s]",
-              format_hex_pretty(reinterpret_cast<const uint8_t *>(recv_string.data()), recv_string.size()).c_str());
+              hex_pretty(reinterpret_cast<const uint8_t *>(recv_string.data()), recv_string.size()).c_str());
         }
         // handle partial upload request
         if (recv_string.size() == 5 && recv_string[0] == 0x08) {
@@ -400,7 +415,7 @@ void NSPanelLovelace::upload_tft(const std::string &url) {
 
   // The Nextion display will, if it's ready to accept data, send a 0x05 byte.
   ESP_LOGD(TAG, "Upgrade response is [%s]",
-           format_hex_pretty(reinterpret_cast<const uint8_t *>(response.data()), response.size()).c_str());
+           hex_pretty(reinterpret_cast<const uint8_t *>(response.data()), response.size()).c_str());
 
   if (response.find(0x05) != std::string::npos) {
     ESP_LOGD(TAG, "preparation for tft update done");
