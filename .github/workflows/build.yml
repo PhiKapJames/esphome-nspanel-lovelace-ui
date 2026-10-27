@@ -10,6 +10,23 @@ on:
   workflow_dispatch:
 
 jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # Dependency-free tests for the pacer and frame parser: they include only the
+      # headers under components/nspanel_lovelace, so plain g++ is enough.
+      - name: Build and run host tests
+        run: |
+          set -euo pipefail
+          for test in tests/host/test_*.cpp; do
+            echo "::group::$test"
+            g++ -std=c++17 -Wall -Wextra -Werror -I components/nspanel_lovelace -o /tmp/host-test "$test"
+            /tmp/host-test
+            echo "::endgroup::"
+          done
+
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
