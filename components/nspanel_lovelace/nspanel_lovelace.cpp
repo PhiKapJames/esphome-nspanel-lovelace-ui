@@ -58,14 +58,22 @@ void NSPanelLovelace::loop() {
     return;
   }
 
-  uint8_t d;
-
+  std::vector<uint8_t> message;
   while (this->available()) {
+    uint8_t d;
     this->read_byte(&d);
-    this->buffer_.push_back(d);
-    if (!this->process_data_()) {
-      ESP_LOGW(TAG, "Unparsed data: 0x%02x", d);
-      this->buffer_.clear();
+    switch (this->frame_parser_.feed(d, &message)) {
+      case FrameRead::MESSAGE:
+        this->process_command_(std::string(message.begin(), message.end()));
+        break;
+      case FrameRead::CHECKSUM_ERROR:
+        ESP_LOGW(TAG, "Dropped frame with invalid checksum");
+        break;
+      case FrameRead::DROP_RESYNC:
+        ESP_LOGW(TAG, "Dropped oversized frame, resyncing");
+        break;
+      default:
+        break;
     }
   }
 
@@ -73,51 +81,6 @@ void NSPanelLovelace::loop() {
   std::string command;
   if (this->custom_send_queue_.next(millis(), &command))
     this->write_custom_command_(command);
-}
-
-bool NSPanelLovelace::process_data_() {
-  uint32_t at = this->buffer_.size() - 1;
-  auto *data = &this->buffer_[0];
-  uint8_t new_byte = data[at];
-
-  // Byte 0: HEADER1 (always 0x55)
-  if (at == 0)
-    return new_byte == 0x55;
-  // Byte 1: HEADER2 (always 0xBB)
-  if (at == 1)
-    return new_byte == 0xBB;
-
-  // Byte 3 & 4 - length (little endian)
-  if (at == 2 || at == 3){
-    return true;
-  }
-  uint16_t length = encode_uint16(data[3], data[2]);
-
-  // Wait until all data comes in
-  if (at - 4 < length){
-//    ESP_LOGD(TAG, "Message (%d/%d): 0x%02x", at - 3, length, new_byte);
-    return true;
-  }
-
-  // Last two bytes: CRC; return after first one
-  if (at == 4 + length) {
-    return true;
-  }
-
-  uint16_t crc16 = encode_uint16(data[4 + length + 1], data[4 + length]);
-  uint16_t calculated_crc16 = NSPanelLovelace::crc16(data, 4 + length);
-
-  if (crc16 != calculated_crc16) {
-    ESP_LOGW(TAG, "Received invalid message checksum %02X!=%02X", crc16, calculated_crc16);
-    return false;
-  }
-
-  const uint8_t *message_data = data + 4;
-  std::string message(message_data, message_data + length);
-
-  this->process_command_(message);
-  this->buffer_.clear();
-  return true;
 }
 
 void NSPanelLovelace::process_command_(const std::string &message) {
@@ -154,7 +117,7 @@ void NSPanelLovelace::write_custom_command_(const std::string &command) {
   data.push_back(command.length() & 0xFF);
   data.push_back((command.length() >> 8) & 0xFF);
   data.insert(data.end(), command.begin(), command.end());
-  auto crc = crc16(data.data(), data.size());
+  auto crc = nspanel_crc16(data.data(), data.size());
   data.push_back(crc & 0xFF);
   data.push_back((crc >> 8) & 0xFF);
   this->write_array(data);
@@ -208,23 +171,6 @@ uint16_t NSPanelLovelace::recv_ret_string_(std::string &response, uint32_t timeo
 
   ret = response.length();
   return ret;
-}
-
-uint16_t NSPanelLovelace::crc16(const uint8_t *data, uint16_t len) {
-  uint16_t crc = 0xFFFF;
-  while (len--) {
-
-    crc ^= *data++;
-    for (uint8_t i = 0; i < 8; i++) {
-      if ((crc & 0x01) != 0) {
-        crc >>= 1;
-        crc ^= 0xA001;
-      } else {
-        crc >>= 1;
-      }
-    }
-  }
-  return crc;
 }
 
 void NSPanelLovelace::start_reparse_mode() {

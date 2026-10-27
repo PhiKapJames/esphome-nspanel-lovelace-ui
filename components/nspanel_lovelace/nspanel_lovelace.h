@@ -9,6 +9,7 @@
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/defines.h"
+#include "nspanel_frame.h"
 
 #ifdef USE_ARDUINO
 #include <HTTPClient.h>
@@ -63,11 +64,8 @@ class NSPanelLovelace : public Component, public uart::UARTDevice {
  protected:
   void set_baud_rate_(int baud_rate);
 
-  static uint16_t crc16(const uint8_t *data, uint16_t len);
-
   uint16_t recv_ret_string_(std::string &response, uint32_t timeout, bool recv_flag);
 
-  bool process_data_();
   void process_command_(const std::string &message);
   void write_custom_command_(const std::string &command);
 
@@ -80,7 +78,7 @@ class NSPanelLovelace : public Component, public uart::UARTDevice {
 
   CallbackManager<void(std::string)> incoming_msg_callback_;
 
-  std::vector<uint8_t> buffer_;
+  FrameParser frame_parser_;
   CustomSendQueue custom_send_queue_;
 
   bool is_updating_ = false;
