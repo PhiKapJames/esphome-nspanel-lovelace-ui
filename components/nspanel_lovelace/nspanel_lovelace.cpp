@@ -187,9 +187,10 @@ void NSPanelLovelace::exit_reparse_mode() {
 }
 
 void NSPanelLovelace::set_baud_rate_(int baud_rate) {
-  auto *uart = reinterpret_cast<uart::IDFUARTComponent *>(this->parent_);
-  uart->set_baud_rate(baud_rate);
-  uart->setup();
+  // Reconfigure the driver already owned by this UART in place. Calling setup() again would
+  // take a fresh uart_num_ from the shared counter and leave the previous driver installed.
+  this->parent_->set_baud_rate(static_cast<uint32_t>(baud_rate));
+  this->parent_->load_settings(false);
 }
 
 }  // namespace nspanel_lovelace

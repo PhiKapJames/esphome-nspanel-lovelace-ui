@@ -7,6 +7,8 @@
 
 #include <esp_heap_caps.h>
 
+#include <new>
+
 namespace esphome {
 namespace nspanel_lovelace {
 static const char *const TAG = "nspanel_lovelace_upload";
@@ -102,6 +104,13 @@ int NSPanelLovelace::upload_by_chunks_(HTTPClient *http, const std::string &url,
     }
     int c = http->getStreamPtr()->readBytes(
         &this->transfer_buffer_[fetched], ((size > this->transfer_buffer_size_) ? this->transfer_buffer_size_ : size));
+    if (c <= 0) {
+      // readBytes gives 0 on timeout and -1 on error; adding either to fetched would index the
+      // buffer below zero and spin here forever.
+      ESP_LOGE(TAG, "HTTP stream stalled after %d of %d bytes", fetched, range);
+      http->end();
+      return -1;
+    }
     fetched += c;
   }
   http->end();
@@ -164,6 +173,10 @@ int NSPanelLovelace::upload_by_chunks_(const std::string &url, int range_start) 
       .cert_pem = nullptr,
   };
   esp_http_client_handle_t client = esp_http_client_init(&config);
+  if (client == nullptr) {
+    ESP_LOGE(TAG, "Failed to create HTTP client");
+    return -1;
+  }
 
   char range_header[64];
   sprintf(range_header, "bytes=%d-%d", range_start, range_end);
@@ -182,6 +195,14 @@ int NSPanelLovelace::upload_by_chunks_(const std::string &url, int range_start) 
   ESP_LOGV(TAG, "Fetch content length");
   int content_length = esp_http_client_fetch_headers(client);
   ESP_LOGV(TAG, "content_length = %d", content_length);
+  // Only valid once the response headers have been fetched. A 404 body would otherwise be
+  // streamed to the display as if it were TFT firmware.
+  int status = esp_http_client_get_status_code(client);
+  if (status != 200 && status != 206) {
+    ESP_LOGE(TAG, "Unexpected HTTP status %d for %s - is the TFT URL correct?", status, url.c_str());
+    esp_http_client_cleanup(client);
+    return -1;
+  }
   if (content_length <= 0) {
     ESP_LOGE(TAG, "Failed to get content length: %d", content_length);
     esp_http_client_cleanup(client);
@@ -189,11 +210,15 @@ int NSPanelLovelace::upload_by_chunks_(const std::string &url, int range_start) 
   }
 
   ESP_LOGV(TAG, "Allocate buffer");
-  uint8_t *buffer = new uint8_t[4096];
+  // std::nothrow so an out-of-memory upload fails through the normal error path instead of aborting.
+  uint8_t *buffer = new (std::nothrow) uint8_t[4096];
   std::string recv_string;
+  int total_read = 0;
   if (buffer == nullptr) {
     ESP_LOGE(TAG, "Failed to allocate memory for buffer");
     ESP_LOGV(TAG, "Available heap: %u", esp_get_free_heap_size());
+    esp_http_client_cleanup(client);
+    return -1;
   } else {
     ESP_LOGV(TAG, "Memory for buffer allocated successfully");
 
@@ -203,6 +228,7 @@ int NSPanelLovelace::upload_by_chunks_(const std::string &url, int range_start) 
       int read_len = esp_http_client_read(client, reinterpret_cast<char *>(buffer), 4096);
       ESP_LOGVV(TAG, "Read %d bytes from HTTP client, writing to UART", read_len);
       if (read_len > 0) {
+        total_read += read_len;
         this->write_array(buffer, read_len);
         ESP_LOGVV(TAG, "Write to UART successful");
         this->recv_ret_string_(recv_string, 5000, true);
@@ -245,6 +271,13 @@ int NSPanelLovelace::upload_by_chunks_(const std::string &url, int range_start) 
     ESP_LOGVV(TAG, "Memory for buffer deallocated");
   }
   esp_http_client_cleanup(client);
+  // A short body means the connection died or the server did not serve the requested range, and
+  // reporting progress anyway would make the display wait for bytes that never arrive.
+  const int expected = range_end - range_start + 1;
+  if (total_read != expected) {
+    ESP_LOGE(TAG, "Range %s delivered %d of %d bytes", range_header, total_read, expected);
+    return -1;
+  }
   return range_end + 1;
 }
 #endif
